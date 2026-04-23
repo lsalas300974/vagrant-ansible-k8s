@@ -1,0 +1,63 @@
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPClusterConfig
+metadata:
+  name: cilium-bgp
+spec:
+  bgpInstances:
+  - name: cilium-bgp
+    localASN: 65001
+    peers:
+    - name: "router"
+      peerASN: 65001
+      peerAddress: "10.10.10.40"
+      peerConfigRef:
+        name: "cilium-peer"
+
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPPeerConfig
+metadata:
+  name: cilium-peer
+spec:
+  families:
+    - afi: ipv4
+      safi: unicast
+      advertisements:
+        matchLabels:
+          advertise: "bgp"
+
+---
+apiVersion: cilium.io/v2alpha1
+kind: CiliumBGPAdvertisement
+metadata:
+  name: bgp-advertisements
+  labels:
+    advertise: bgp
+spec:
+  advertisements:
+    - advertisementType: "PodCIDR"
+    - advertisementType: "Service"
+      service:
+        addresses:
+          - LoadBalancerIP
+      selector:
+        matchExpressions:
+          - { key: bgp, operator: In, values: [ public ] }
+      attributes:
+        communities:
+          standard: [ "65001" ]
+
+---
+apiVersion: "cilium.io/v2alpha1"
+kind: CiliumLoadBalancerIPPool
+metadata:
+  name: "ip-pool-public"
+  labels:
+    bgp: public
+spec:
+  blocks:
+    - cidr: "172.17.0.0/24"
+  serviceSelector:
+    matchExpressions:
+      - {key: bgp, operator: In, values: [public]}

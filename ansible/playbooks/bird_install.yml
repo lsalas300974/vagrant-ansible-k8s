@@ -1,0 +1,40 @@
+---
+- name: Install and enable BIRD 2 Internet Routing Daemon
+  hosts: all
+  become: true
+  tasks:
+
+    - name: Include task to create hosts file
+      ansible.builtin.include_tasks: includes/create_hosts_file.yml
+
+    - name: Include task to install packages that enable apt over HTTPS
+      ansible.builtin.include_tasks: includes/apt_over_https.yml
+
+    - name: Include task to install useful packages
+      ansible.builtin.include_tasks: includes/install_useful_packages.yml
+
+    - name: Install the BIRD 2 package
+      ansible.builtin.apt:
+        name: bird2
+        state: present
+        update_cache: yes
+
+    - name: Copy BIRD configuration file
+      ansible.builtin.copy:
+        src: ../files/bird.conf
+        dest: /etc/bird/bird.conf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload bird
+
+    - name: Enable and start the BIRD service
+      ansible.builtin.service:
+        name: bird
+        enabled: yes
+        state: started
+
+  handlers:
+    - name: reload bird
+      ansible.builtin.command: birdc configure
+      listen: reload bird

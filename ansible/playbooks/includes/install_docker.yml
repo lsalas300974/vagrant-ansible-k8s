@@ -1,0 +1,62 @@
+---
+- name: Remove conflicting Docker and containerd packages
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-doc
+      - docker-compose
+      - docker-compose-v2
+      - podman-docker
+      - containerd
+      - runc
+    state: absent
+    purge: yes
+    autoremove: yes
+
+- name: Delete containerd config.toml to force regeneration
+  ansible.builtin.file:
+    path: /etc/containerd/config.toml
+    state: absent
+
+- name: Create keyrings directory for APT
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+- name: Download Docker GPG key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: '0644'
+
+- name: Add Docker apt repository
+  ansible.builtin.apt_repository:
+    repo: "deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable"
+    state: present
+    filename: docker
+
+- name: Update APT package index
+  ansible.builtin.apt:
+    update_cache: yes
+
+- name: Install containerd
+  ansible.builtin.apt:
+    name: containerd.io
+    state: present
+    update_cache: yes
+
+- name: Copy config.toml to /etc/containerd/config.toml
+  ansible.builtin.copy:
+    src: ../files/config.toml
+    dest: /etc/containerd/config.toml
+    mode: 0644
+    owner: root
+    group: root
+
+- name: Restart containerd
+  ansible.builtin.systemd:
+    name: containerd
+    state: restarted
+    enabled: yes
+    daemon_reload: yes

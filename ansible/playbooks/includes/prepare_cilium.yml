@@ -1,0 +1,34 @@
+- name: Ensure required kernel modules and packages are installed for Cilium
+  ansible.builtin.apt:
+    name:
+      - curl
+      - linux-tools-common
+      - "linux-tools-{{ ansible_kernel }}"
+      - iproute2
+      - iptables
+      - libbpf-dev
+    update_cache: yes
+
+- name: Ensure BPF filesystem is mounted
+  ansible.builtin.mount:
+    path: /sys/fs/bpf
+    src: bpffs
+    fstype: bpf
+    state: mounted
+
+- name: Enable kernel parameters required by Cilium
+  ansible.builtin.sysctl:
+    name: "{{ item.name }}"
+    value: "{{ item.value }}"
+    sysctl_set: yes
+    state: present
+    reload: yes
+  loop:
+    - { name: 'net.ipv4.ip_forward', value: '1' }
+    - { name: 'net.ipv6.conf.all.forwarding', value: '1' }
+
+- name: Check if cgroup v2 is enabled
+  ansible.builtin.command: stat /sys/fs/cgroup/cgroup.controllers
+  register: cgroupv2_check
+  failed_when: false
+  changed_when: false

@@ -1,0 +1,110 @@
+---
+- hosts: all
+  become: true
+
+  tasks:
+    - name: Include task to create hosts file
+      ansible.builtin.include_tasks: includes/create_hosts_file.yml
+
+    - name: Include task to install packages that enable apt over HTTPS
+      ansible.builtin.include_tasks: includes/apt_over_https.yml
+
+    - name: Include task to install useful packages
+      ansible.builtin.include_tasks: includes/install_useful_packages.yml
+
+    - name: Include task to install Docker
+      ansible.builtin.include_tasks: includes/install_docker.yml
+
+    - name: Include task to bootstrap k8s
+      ansible.builtin.include_tasks: includes/bootstrap_k8s.yml
+ 
+    - name: Check if cluster is already initialized
+      ansible.builtin.stat:
+        path: /etc/kubernetes/admin.conf
+      register: kubeadm_init_check
+
+    - name: Initialize the k8s cluster using kubeadm
+      ansible.builtin.command:
+        kubeadm init
+          --control-plane-endpoint "10.10.10.30:6443"
+          --apiserver-advertise-address {{ node_ip }}
+          --pod-network-cidr=10.244.0.0/16
+          --skip-phases=addon/kube-proxy
+      when: not kubeadm_init_check.stat.exists
+
+    - name: Include task to setup kubeconfig
+      ansible.builtin.include_tasks: includes/setup_kube_config.yml
+
+    - name: Generate join command
+      ansible.builtin.command: kubeadm token create --print-join-command
+      register: join_command
+      when: not kubeadm_init_check.stat.exists
+
+    # Only required for additional master nodes, not worker nodes
+    - name: Upload certs and get the key
+      ansible.builtin.shell: kubeadm init phase upload-certs --upload-certs | tail -n 1
+      register: cert_key
+      when: not kubeadm_init_check.stat.exists
+
+    - name: Save join command to file
+      ansible.builtin.template:
+        src: ../templates/join_command.j2
+        dest: /tmp/join-command
+      delegate_to: localhost
+      become: no
+      when: not kubeadm_init_check.stat.exists
+
+    - name: Save certificate key to file
+      ansible.builtin.template:
+        src: ../templates/cert_key.j2
+        dest: /tmp/cert-key
+      delegate_to: localhost
+      become: no
+      when: not kubeadm_init_check.stat.exists
+
+    - name: Include task to prepare Cilium prerequisites
+      ansible.builtin.include_tasks: includes/prepare_cilium.yml
+    
+    - name: Download Cilium CLI v0.19.2 (for Cilium v1.19.1)
+      ansible.builtin.get_url:
+        url: https://github.com/cilium/cilium-cli/releases/download/v0.19.2/cilium-linux-amd64.tar.gz
+        dest: /tmp/cilium-linux-amd64.tar.gz
+        mode: '0755'
+
+    - name: Extract Cilium CLI
+      ansible.builtin.unarchive:
+        src: /tmp/cilium-linux-amd64.tar.gz
+        dest: /usr/local/bin/
+        remote_src: yes
+        creates: /usr/local/bin/cilium
+
+    - name: Ensure Cilium CLI is executable
+      ansible.builtin.file:
+        path: /usr/local/bin/cilium
+        mode: '0755'
+
+    - name: Install Cilium v1.19.1 with kube-proxy replacement
+      ansible.builtin.command: >
+        /usr/local/bin/cilium install
+        --version 1.19.1
+        --set kubeProxyReplacement=true
+        --set operator.replicas=1
+        --set loadBalancer.l7.enabled=true
+        --set bgpControlPlane.enabled=true
+
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      register: cilium_install
+
+    - name: Wait for Cilium to be ready
+      ansible.builtin.command: /usr/local/bin/cilium status --wait
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+      retries: 10
+      delay: 15
+      register: cilium_status
+      until: cilium_status.rc == 0
+
+    - name: Enable Cilium Hubble
+      ansible.builtin.command: >
+        /usr/local/bin/cilium hubble enable

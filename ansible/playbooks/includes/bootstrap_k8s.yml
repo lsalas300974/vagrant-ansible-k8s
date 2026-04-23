@@ -1,0 +1,60 @@
+---
+# Kubelet will not start if the system has swap enabled, so disable swap
+- name: Remove swapfile from /etc/fstab
+  ansible.posix.mount:
+    name: "{{ item }}"
+    fstype: swap
+    state: absent
+  with_items:
+    - swap
+    - none
+
+- name: Disable swap
+  ansible.builtin.command: swapoff -a
+  when: ansible_swaptotal_mb > 0
+
+
+- name: Create keyrings directory if not exists
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    mode: '0755'
+
+# Install k8s binaries
+- name: Download Kubernetes GPG key
+  ansible.builtin.get_url:
+    url: https://pkgs.k8s.io/core:/stable:/v1.35/deb/Release.key
+    dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
+    mode: '0644'
+
+- name: Add Kubernetes apt repository (new style)
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/v1.35/deb/ /"
+    state: present
+    filename: kubernetes
+
+- name: Install k8s binaries
+  ansible.builtin.apt:
+    name: "{{ packages }}"
+    state: present
+    update_cache: yes
+  vars:
+    packages:
+      - kubelet=1.35.0-1.1
+      - kubeadm=1.35.0-1.1
+      - kubectl=1.35.0-1.1
+
+- name: Hold k8s packages to prevent accidental upgrades
+  ansible.builtin.dpkg_selections:
+    name: "{{ item }}"
+    selection: hold
+  loop:
+    - kubelet
+    - kubeadm
+    - kubectl
+
+- name: Configure node ip
+  ansible.builtin.lineinfile:
+    path: /etc/default/kubelet
+    line: "KUBELET_EXTRA_ARGS=--node-ip={{ node_ip }}"
+    create: yes
