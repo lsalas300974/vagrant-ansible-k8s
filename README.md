@@ -258,6 +258,28 @@ mv ~/.kube/config-merged ~/.kube/config
 kubectl config use-context kubernetes-admin@kubernetes
 ```
 
+### 6. Install Cilium CLI on your host machine
+
+To run `cilium status` or `cilium bgp peers` from your host instead of SSHing into a VM, install the Cilium CLI:
+
+```bash
+CILIUM_CLI_VERSION=v0.19.2
+curl -L --fail https://github.com/cilium/cilium-cli/releases/download/${CILIUM_CLI_VERSION}/cilium-linux-amd64.tar.gz -o /tmp/cilium-linux-amd64.tar.gz
+sudo tar -xzf /tmp/cilium-linux-amd64.tar.gz -C /usr/local/bin/
+rm /tmp/cilium-linux-amd64.tar.gz
+```
+
+> **Note:** On macOS, replace `linux` with `darwin` in the URL above.
+
+Verify the installation:
+
+```bash
+cilium version
+cilium status
+```
+
+This requires `KUBECONFIG` to be set (see step 5).
+
 ---
 
 ## Deploying a Sample Application
