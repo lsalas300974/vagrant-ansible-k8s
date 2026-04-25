@@ -237,6 +237,27 @@ sudo birdc show protocols
 
 All 5 BGP sessions should show `Established`.
 
+### 5. Access the cluster from your host machine
+
+To use `kubectl` from your host without SSHing into a VM, copy the kubeconfig from the primary master:
+
+```bash
+mkdir -p ~/.kube
+vagrant ssh k8s-master-1 -c "sudo cat /etc/kubernetes/admin.conf" > ~/.kube/config-vagrant-k8s
+export KUBECONFIG=~/.kube/config-vagrant-k8s
+kubectl get nodes
+```
+
+To make this persistent, add the `export` line to your shell profile (`~/.bashrc` or `~/.zshrc`).
+
+If you have existing kubeconfig files for other clusters, merge them:
+
+```bash
+KUBECONFIG=~/.kube/config:~/.kube/config-vagrant-k8s kubectl config view --flatten > ~/.kube/config-merged
+mv ~/.kube/config-merged ~/.kube/config
+kubectl config use-context kubernetes-admin@kubernetes
+```
+
 ---
 
 ## Deploying a Sample Application
