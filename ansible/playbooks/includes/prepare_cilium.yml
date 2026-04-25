@@ -3,7 +3,7 @@
     name:
       - curl
       - linux-tools-common
-      - "linux-tools-{{ ansible_kernel }}"
+      - "linux-tools-{{ ansible_facts['kernel'] }}"
       - iproute2
       - iptables
       - libbpf-dev

@@ -89,6 +89,8 @@ This fork is a **significant modernization** of the original project. The follow
 
 4. **BIRD 2** runs on a dedicated router VM and establishes iBGP sessions (ASN 65001) with all 5 Kubernetes nodes. When a `LoadBalancer` service is created, Cilium assigns an IP from the pool (`172.17.0.0/24`) and advertises it via BGP. BIRD learns the route and installs it in the kernel routing table, making the service reachable from the router's external interface (`192.168.0.40`).
 
+> **Deep dive:** For a detailed explanation of how Cilium and BIRD work together step by step, see [How Cilium and BIRD Work Together](docs/cilium-bird-bgp.md).
+
 ---
 
 ## Components & Versions
@@ -185,54 +187,72 @@ vagrant up
 
 This provisions all 7 VMs sequentially. The full process takes approximately 15–25 minutes depending on your hardware and internet speed.
 
-### 4. Post-provisioning setup
+During the bird-router provisioning, Vagrant will prompt you to **select a bridged network interface**:
 
-After all VMs are up, SSH into the primary master and apply the remaining configurations:
+```
+==> bird-router: Available bridged network interfaces:
+1) enp8s0
+2) wlp7s0
+3) virbr0
+4) docker0
+==> bird-router: Which interface should the network bridge to?
+```
+
+Select the interface your host uses to connect to the internet (typically the first wired or wireless adapter). This bridge gives the BIRD router an external-facing IP (`192.168.0.40`) for routing LoadBalancer traffic outside the cluster.
+
+Everything is fully automated — CoreDNS configuration, Cilium BGP setup, and BGP session validation are all handled during provisioning. No manual post-provisioning steps are required.
+
+### 4. Verify the cluster
+
+After `vagrant up` completes, SSH into the primary master:
 
 ```bash
 vagrant ssh k8s-master-1
-kubectl replace -f /vagrant/coredns.yaml
-kubectl -n kube-system rollout restart deployment coredns
-kubectl apply -f /vagrant/cilium-bgp.yml
 ```
 
-This:
-- Configures CoreDNS to forward external queries to 1.1.1.1 and 8.8.8.8
-- Deploys the Cilium BGP cluster configuration, peer config, advertisements, and LoadBalancer IP pool
-
-### 5. Verify the cluster
+Check that all nodes are Ready:
 
 ```bash
-# Check nodes
 kubectl get nodes -o wide
+```
 
-# Check Cilium status
+Check Cilium status (all agents should be OK):
+
+```bash
 cilium status
+```
 
-# Check BGP peering
+Check BGP peering (all 5 nodes should show `established`):
+
+```bash
 cilium bgp peers
 ```
+
+Verify from the BIRD router side:
+
+```bash
+vagrant ssh bird-router
+sudo birdc show protocols
+```
+
+All 5 BGP sessions should show `Established`.
 
 ---
 
 ## Deploying a Sample Application
 
-SSH to the primary master:
+A sample nginx deployment (2 replicas) and LoadBalancer service are **automatically deployed** during provisioning. You can verify and test them immediately after `vagrant up` completes.
+
+### Verify the deployment
 
 ```bash
 vagrant ssh k8s-master-1
 ```
 
-Deploy an nginx application with 2 replicas:
+Check that the pods are running:
 
 ```bash
-kubectl apply -f /vagrant/k8s/deployment.yml
-```
-
-Expose it via a LoadBalancer service:
-
-```bash
-kubectl apply -f /vagrant/k8s/service.yml
+kubectl get pods -l app=nginx -o wide
 ```
 
 Check the assigned external IP:
@@ -241,7 +261,72 @@ Check the assigned external IP:
 kubectl get svc nginx-service
 ```
 
-The service will receive an IP from the Cilium pool (`172.17.0.0/24`), advertised via BGP to the BIRD router.
+Expected output:
+
+```
+NAME            TYPE           CLUSTER-IP     EXTERNAL-IP   PORT(S)        AGE
+nginx-service   LoadBalancer   10.108.x.x     172.17.0.1    80:3xxxx/TCP   10s
+```
+
+### Verify BGP route propagation
+
+From the BIRD router, confirm the route was learned:
+
+```bash
+vagrant ssh bird-router
+sudo birdc show route | grep 172.17
+```
+
+You should see the LoadBalancer IP with a next-hop pointing to one of the K8s worker nodes:
+
+```
+172.17.0.1/32        unicast [k8s_worker_1 ...] * (100/?) [i]
+                     via 10.10.10.21 on eth2
+```
+
+### Access the service
+
+**From the BIRD router** (direct access via BGP route):
+
+```bash
+vagrant ssh bird-router
+curl http://172.17.0.1
+```
+
+**From your host machine** (add a static route to the LoadBalancer pool via the BIRD router):
+
+```bash
+sudo ip route add 172.17.0.0/24 via 10.10.10.40
+curl http://172.17.0.1
+```
+
+> **Note:** The BIRD router acts as a pure IP router — no NAT is involved. It forwards traffic to the correct K8s node using BGP-learned routes. The static route on your host tells it to send LoadBalancer traffic through the BIRD router. In a production environment, your upstream router would learn this route via BGP peering with BIRD.
+
+**From any machine on your local network:**
+
+Open a browser and navigate to `http://192.168.0.40`. You should see the nginx welcome page.
+
+### Deploy your own services
+
+To expose your own application the same way, create a `LoadBalancer` service with the label `bgp: public`:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: my-service
+  labels:
+    bgp: public
+spec:
+  type: LoadBalancer
+  selector:
+    app: my-app
+  ports:
+    - port: 80
+      targetPort: 8080
+```
+
+Each service gets a unique IP from the pool (`172.17.0.0/24`), and BIRD automatically learns the route via BGP.
 
 ---
 
@@ -281,6 +366,7 @@ vagrant ssh bird-router
 .
 ├── Vagrantfile                          # VM definitions and provisioning config
 ├── README.md
+├── ansible.cfg                          # Ansible config (Python interpreter, warnings)
 ├── setup.sh                             # Host dependency installer
 ├── coredns.yaml                         # CoreDNS ConfigMap with external forwarders
 ├── cilium-bgp.yml                       # Cilium BGP cluster config, peer, advertisements, IP pool
@@ -298,10 +384,10 @@ vagrant ssh bird-router
     │   └── cert_key.j2                  # Certificate key template for control plane join
     └── playbooks/
         ├── k8s_lb.yml                   # HAProxy load balancer setup
-        ├── k8s_master_primary.yml       # Primary master: kubeadm init + Cilium install
+        ├── k8s_master_primary.yml       # Primary master: kubeadm init + Cilium + CoreDNS + BGP
         ├── k8s_master_secondary.yml     # Secondary masters: join as control plane
         ├── k8s_worker.yml               # Workers: join cluster
-        ├── bird_install.yml             # BIRD 2 router setup
+        ├── bird_install.yml             # BIRD 2 router setup + BGP validation
         └── includes/
             ├── apt_over_https.yml       # APT HTTPS transport packages
             ├── install_useful_packages.yml  # net-tools
@@ -316,43 +402,7 @@ vagrant ssh bird-router
 
 ## Troubleshooting
 
-### Cilium pods not ready
-
-```bash
-cilium status --wait
-kubectl -n kube-system get pods -l k8s-app=cilium
-```
-
-### BGP sessions not established
-
-```bash
-# From a K8s node
-cilium bgp peers
-
-# From the BIRD router
-vagrant ssh bird-router
-sudo birdc show protocols all
-```
-
-### Nodes not joining the cluster
-
-Check that the join token hasn't expired (tokens are valid for 24 hours by default):
-
-```bash
-# On the primary master
-kubeadm token list
-# Create a new token if needed
-kubeadm token create --print-join-command
-```
-
-### DNS not resolving inside pods
-
-Verify CoreDNS is running and the ConfigMap was applied:
-
-```bash
-kubectl -n kube-system get pods -l k8s-app=kube-dns
-kubectl -n kube-system get configmap coredns -o yaml
-```
+See [Troubleshooting Guide](docs/troubleshooting.md) for common issues and solutions.
 
 ---
 

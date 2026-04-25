@@ -26,15 +26,34 @@
         owner: root
         group: root
         mode: '0644'
-      notify: reload bird
 
-    - name: Enable and start the BIRD service
+    - name: Enable IP forwarding
+      ansible.builtin.sysctl:
+        name: net.ipv4.ip_forward
+        value: '1'
+        sysctl_set: yes
+        state: present
+        reload: yes
+
+    - name: Enable and restart the BIRD service
       ansible.builtin.service:
         name: bird
         enabled: yes
-        state: started
+        state: restarted
 
-  handlers:
-    - name: reload bird
-      ansible.builtin.command: birdc configure
-      listen: reload bird
+    - name: Wait for BGP sessions to establish
+      ansible.builtin.shell: birdc show protocols | grep -c Established
+      register: bgp_established
+      retries: 30
+      delay: 10
+      until: bgp_established.stdout | int >= 5
+      changed_when: false
+
+    - name: Show BGP peer status
+      ansible.builtin.command: birdc show protocols
+      register: bird_status
+      changed_when: false
+
+    - name: Display BGP peer status
+      ansible.builtin.debug:
+        var: bird_status.stdout_lines

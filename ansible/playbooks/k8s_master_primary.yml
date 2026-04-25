@@ -17,7 +17,10 @@
 
     - name: Include task to bootstrap k8s
       ansible.builtin.include_tasks: includes/bootstrap_k8s.yml
- 
+
+    - name: Include task to prepare Cilium prerequisites
+      ansible.builtin.include_tasks: includes/prepare_cilium.yml
+
     - name: Check if cluster is already initialized
       ansible.builtin.stat:
         path: /etc/kubernetes/admin.conf
@@ -62,9 +65,6 @@
       become: no
       when: not kubeadm_init_check.stat.exists
 
-    - name: Include task to prepare Cilium prerequisites
-      ansible.builtin.include_tasks: includes/prepare_cilium.yml
-    
     - name: Download Cilium CLI v0.19.2 (for Cilium v1.19.1)
       ansible.builtin.get_url:
         url: https://github.com/cilium/cilium-cli/releases/download/v0.19.2/cilium-linux-amd64.tar.gz
@@ -108,3 +108,28 @@
     - name: Enable Cilium Hubble
       ansible.builtin.command: >
         /usr/local/bin/cilium hubble enable
+
+    - name: Replace CoreDNS ConfigMap with custom forwarders
+      ansible.builtin.command: kubectl replace -f /vagrant/coredns.yaml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Restart CoreDNS deployment
+      ansible.builtin.command: kubectl -n kube-system rollout restart deployment coredns
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Apply Cilium BGP configuration
+      ansible.builtin.command: kubectl apply -f /vagrant/cilium-bgp.yml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Deploy sample nginx application
+      ansible.builtin.command: kubectl apply -f /vagrant/k8s/deployment.yml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Deploy nginx LoadBalancer service
+      ansible.builtin.command: kubectl apply -f /vagrant/k8s/service.yml
+      environment:
+        KUBECONFIG: /etc/kubernetes/admin.conf

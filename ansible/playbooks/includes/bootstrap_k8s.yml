@@ -11,7 +11,7 @@
 
 - name: Disable swap
   ansible.builtin.command: swapoff -a
-  when: ansible_swaptotal_mb > 0
+  when: ansible_facts['swaptotal_mb'] > 0
 
 
 - name: Create keyrings directory if not exists
@@ -23,13 +23,13 @@
 # Install k8s binaries
 - name: Download Kubernetes GPG key
   ansible.builtin.get_url:
-    url: https://pkgs.k8s.io/core:/stable:/v1.35/deb/Release.key
+    url: https://prod-cdn.packages.k8s.io/repositories/isv:/kubernetes:/core:/stable:/v1.35/deb/Release.key
     dest: /etc/apt/keyrings/kubernetes-apt-keyring.asc
     mode: '0644'
 
-- name: Add Kubernetes apt repository (new style)
+- name: Add Kubernetes apt repository
   ansible.builtin.apt_repository:
-    repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://pkgs.k8s.io/core:/stable:/v1.35/deb/ /"
+    repo: "deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.asc] https://prod-cdn.packages.k8s.io/repositories/isv:/kubernetes:/core:/stable:/v1.35/deb/ /"
     state: present
     filename: kubernetes
 
