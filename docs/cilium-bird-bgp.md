@@ -21,14 +21,13 @@ This setup solves all three problems using BGP (Border Gateway Protocol):
 │   Your browser ──► http://172.17.0.1 (LoadBalancer IP)           │
 │                    route: 172.17.0.0/24 via 10.10.10.40          │
 └──────────────────────────┬───────────────────────────────────────┘
-                           │
-                           │ IP Forwarding (no NAT)
-                           │
+                           │ static route (next-hop: bird-router)
                            ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                    BIRD 2 Router (bird-router)                   │
 │                    eth2: 10.10.10.40 (private)                   │
 │                    eth1: 192.168.0.40 (external)                 │
+│                    ip_forward=1 (no NAT)                         │
 │                                                                  │
 │  ┌─────────────────────────────────────────────────────────┐     │
 │  │ Routing Table (learned via BGP):                        │     │
@@ -43,7 +42,7 @@ This setup solves all three problems using BGP (Border Gateway Protocol):
 │                           │ iBGP (ASN 65001)                     │
 │                           │ 5 sessions                           │
 └───────────────────────────┼──────────────────────────────────────┘
-                            │
+                            │ BGP-learned route (next-hop: worker)
          ┌──────────────────┼──────────────────┐
          │          ┌───────┼───────┐          │
          ▼          ▼       ▼       ▼          ▼
@@ -55,7 +54,21 @@ This setup solves all three problems using BGP (Border Gateway Protocol):
 │  Agent     ││  Agent     ││  Agent     ││  Agent     ││  Agent     │
 │  (BGP      ││  (BGP      ││  (BGP      ││  (BGP      ││  (BGP      │
 │   speaker) ││   speaker) ││   speaker) ││   speaker) ││   speaker) │
-└────────────┘└────────────┘└────────────┘└────────────┘└────────────┘
+└────────────┘└────────────┘└────────────┘└──────┬─────┘└────────────┘
+                                                 │
+                                                 ▼
+                                  ┌──────────────────────────────┐
+                                  │  nginx-service (LoadBalancer) │
+                                  │  VIP: 172.17.0.1:80           │
+                                  │  Handled by Cilium eBPF       │
+                                  │                               │
+                                  │  ┌────────┐    ┌────────┐    │
+                                  │  │ nginx  │    │ nginx  │    │
+                                  │  │10.0.3. │    │10.0.3. │    │
+                                  │  │  16    │    │  124   │    │
+                                  │  └────────┘    └────────┘    │
+                                  │  Pod CIDR: 10.0.3.0/24       │
+                                  └──────────────────────────────┘
 ```
 
 ## Step by Step: What Happens When You Create a LoadBalancer Service
@@ -229,29 +242,50 @@ The BIRD router has two interfaces:
 - `eth2` (10.10.10.40) — private network, connected to K8s nodes
 - `eth1` (192.168.0.40) — external network, reachable from your LAN
 
-IP forwarding is enabled (`net.ipv4.ip_forward = 1`) so the router forwards packets between interfaces. From your host, you add a static route pointing the LoadBalancer pool to the BIRD router:
+From your host, a static route points the LoadBalancer pool to the BIRD router as the next-hop gateway:
 
 ```bash
 sudo ip route add 172.17.0.0/24 via 10.10.10.40
 ```
 
-Traffic flow (pure routing, no NAT):
+On the BIRD router, `ip_forward=1` allows it to forward packets that are not destined for itself. There are no NAT/masquerade rules — it acts as a pure IP router.
+
+Traffic flow:
 ```
-Host (10.10.10.1) → 172.17.0.1
-  → via 10.10.10.40 (bird-router, host static route)
-    → via 10.10.10.21 (worker-1, BGP-learned kernel route)
-      → Cilium eBPF → nginx pod
+1. Host (10.10.10.1) sends packet to 172.17.0.1
+   → static route: 172.17.0.0/24 via 10.10.10.40 dev vboxnet0
+   → packet sent to bird-router (same L2 subnet 10.10.10.0/24)
+
+2. bird-router (10.10.10.40) receives packet on eth2
+   → ip_forward=1, packet is not for itself, so it forwards
+   → BGP-learned kernel route: 172.17.0.1 via 10.10.10.21 dev eth2
+   → packet sent to k8s-worker-1 (same L2 subnet)
+
+3. k8s-worker-1 (10.10.10.21) receives packet
+   → Cilium eBPF intercepts dst 172.17.0.1:80
+   → DNAT to nginx pod (e.g., 10.0.3.16:80)
+   → pod responds
 ```
 
-### 5. Return Path
+### 5. Return Path (asymmetric)
 
-The response follows the reverse path:
+The return path does **not** go back through the BIRD router:
 ```
-nginx pod → Cilium eBPF → worker-1 (10.10.10.21)
-  → host (10.10.10.1, on the same 10.10.10.0/24 subnet)
+1. nginx pod responds to 10.10.10.1 (the host)
+   → Cilium eBPF rewrites src back to 172.17.0.1
+
+2. k8s-worker-1 routes the reply to 10.10.10.1
+   → 10.10.10.1 is on the same L2 subnet (10.10.10.0/24 via eth1)
+   → packet sent DIRECTLY to the host, bypassing bird-router
 ```
 
-No NAT is involved — the BIRD router acts as a pure IP router.
+The path is asymmetric:
+```
+Outbound:  Host → bird-router → worker-1  (2 hops)
+Return:    worker-1 → Host                (1 hop, direct)
+```
+
+No NAT is involved at any point. The BIRD router is only needed on the outbound path because the host doesn't know where `172.17.0.1` lives — but the worker knows where `10.10.10.1` is because they share the same subnet.
 
 ## Why iBGP?
 
