@@ -200,9 +200,25 @@ During the bird-router provisioning, Vagrant will prompt you to **select a bridg
 
 Select the interface your host uses to connect to the internet (typically the first wired or wireless adapter). This bridge gives the BIRD router an external-facing IP (`192.168.0.40`) for routing LoadBalancer traffic outside the cluster.
 
-Everything is fully automated — CoreDNS configuration, Cilium BGP setup, and BGP session validation are all handled during provisioning. No manual post-provisioning steps are required.
+Everything is fully automated — CoreDNS configuration, Cilium BGP setup, and BGP session validation are all handled during provisioning.
 
-### 4. Verify the cluster
+### 4. Configure your host
+
+After `vagrant up` (or after rebooting your host), run the host configuration script to set up the static route for LoadBalancer IPs and the `KUBECONFIG` environment variable:
+
+```bash
+source start_host_config.sh
+```
+
+> **Note:** You must use `source` (not `./`) so the `KUBECONFIG` export takes effect in your current shell. The static route requires `sudo` and will prompt for your password.
+
+This script:
+- Adds a static route `172.17.0.0/24 via 10.10.10.40` so your host can reach LoadBalancer service IPs through the BIRD router
+- Exports `KUBECONFIG=~/.kube/config-vagrant-k8s` so `kubectl` connects to the cluster
+
+Both settings are lost on host reboot, so run this script again after each restart.
+
+### 5. Verify the cluster
 
 After `vagrant up` completes, SSH into the primary master:
 
@@ -237,7 +253,7 @@ sudo birdc show protocols
 
 All 5 BGP sessions should show `Established`.
 
-### 5. Access the cluster from your host machine
+### 6. Access the cluster from your host machine
 
 To use `kubectl` from your host without SSHing into a VM, copy the kubeconfig from the primary master:
 
@@ -258,7 +274,7 @@ mv ~/.kube/config-merged ~/.kube/config
 kubectl config use-context kubernetes-admin@kubernetes
 ```
 
-### 6. Install Cilium CLI on your host machine
+### 7. Install Cilium CLI on your host machine
 
 To run `cilium status` or `cilium bgp peers` from your host instead of SSHing into a VM, install the Cilium CLI:
 
@@ -336,10 +352,9 @@ vagrant ssh bird-router
 curl http://172.17.0.1
 ```
 
-**From your host machine** (add a static route to the LoadBalancer pool via the BIRD router):
+**From your host machine** (requires `source start_host_config.sh` — see step 4):
 
 ```bash
-sudo ip route add 172.17.0.0/24 via 10.10.10.40
 curl http://172.17.0.1
 ```
 
@@ -385,6 +400,7 @@ vagrant halt
 
 ```bash
 vagrant up
+source start_host_config.sh
 ```
 
 ### Destroy all VMs (deletes everything)
@@ -411,6 +427,7 @@ vagrant ssh bird-router
 ├── README.md
 ├── ansible.cfg                          # Ansible config (Python interpreter, warnings)
 ├── setup.sh                             # Host dependency installer
+├── start_host_config.sh                 # Host route + KUBECONFIG setup (run after each reboot)
 ├── coredns.yaml                         # CoreDNS ConfigMap with external forwarders
 ├── cilium-bgp.yml                       # Cilium BGP cluster config, peer, advertisements, IP pool
 ├── k8s/

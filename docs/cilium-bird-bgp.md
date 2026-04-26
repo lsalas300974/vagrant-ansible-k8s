@@ -22,17 +22,20 @@ This setup solves all three problems using BGP (Border Gateway Protocol):
 │   Your browser ──► 192.168.0.40 (bird-router external IP)       │
 └──────────────────────────┬───────────────────────────────────────┘
                            │
-                           │ MASQUERADE (NAT)
-                           │ 192.168.0.40 → 172.17.0.x
+                           │ IP Forwarding (no NAT)
+                           │
                            ▼
 ┌──────────────────────────────────────────────────────────────────┐
 │                    BIRD 2 Router (bird-router)                   │
-│                    10.10.10.40 / 192.168.0.40                    │
+│                    eth2: 10.10.10.40 (private)                   │
+│                    eth1: 192.168.0.40 (external)                 │
 │                                                                  │
 │  ┌─────────────────────────────────────────────────────────┐     │
 │  │ Routing Table (learned via BGP):                        │     │
 │  │   172.17.0.1/32 → via 10.10.10.21 (k8s-worker-1)       │     │
-│  │   172.17.0.2/32 → via 10.10.10.22 (k8s-worker-2)       │     │
+│  │   10.0.0.0/24   → via 10.10.10.11 (pod CIDR master-1)  │     │
+│  │   10.0.1.0/24   → via 10.10.10.12 (pod CIDR master-2)  │     │
+│  │   10.0.2.0/24   → via 10.10.10.13 (pod CIDR master-3)  │     │
 │  │   10.0.3.0/24   → via 10.10.10.21 (pod CIDR worker-1)  │     │
 │  │   10.0.4.0/24   → via 10.10.10.22 (pod CIDR worker-2)  │     │
 │  └─────────────────────────────────────────────────────────┘     │
@@ -41,18 +44,18 @@ This setup solves all three problems using BGP (Border Gateway Protocol):
 │                           │ 5 sessions                           │
 └───────────────────────────┼──────────────────────────────────────┘
                             │
-              ┌─────────────┼─────────────┐
-              │             │             │
-              ▼             ▼             ▼
-┌──────────────┐ ┌──────────────┐ ┌──────────────┐
-│ k8s-master-1 │ │ k8s-worker-1 │ │ k8s-worker-2 │
-│ 10.10.10.11  │ │ 10.10.10.21  │ │ 10.10.10.22  │
-│              │ │              │ │              │
-│  Cilium      │ │  Cilium      │ │  Cilium      │
-│  Agent       │ │  Agent       │ │  Agent       │
-│  (BGP        │ │  (BGP        │ │  (BGP        │
-│   speaker)   │ │   speaker)   │ │   speaker)   │
-└──────────────┘ └──────────────┘ └──────────────┘
+         ┌──────────────────┼──────────────────┐
+         │          ┌───────┼───────┐          │
+         ▼          ▼       ▼       ▼          ▼
+┌────────────┐┌────────────┐┌────────────┐┌────────────┐┌────────────┐
+│k8s-master-1││k8s-master-2││k8s-master-3││k8s-worker-1││k8s-worker-2│
+│10.10.10.11 ││10.10.10.12 ││10.10.10.13 ││10.10.10.21 ││10.10.10.22 │
+│            ││            ││            ││            ││            │
+│  Cilium    ││  Cilium    ││  Cilium    ││  Cilium    ││  Cilium    │
+│  Agent     ││  Agent     ││  Agent     ││  Agent     ││  Agent     │
+│  (BGP      ││  (BGP      ││  (BGP      ││  (BGP      ││  (BGP      │
+│   speaker) ││   speaker) ││   speaker) ││   speaker) ││   speaker) │
+└────────────┘└────────────┘└────────────┘└────────────┘└────────────┘
 ```
 
 ## Step by Step: What Happens When You Create a LoadBalancer Service
@@ -70,6 +73,12 @@ metadata:
     bgp: public    # ← This label triggers BGP advertisement
 spec:
   type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: nginx
+  ports:
+    - port: 80
+      targetPort: 80
 ```
 
 Cilium's **CiliumLoadBalancerIPPool** assigns an IP from the pool `172.17.0.1–172.17.0.254`:
@@ -79,6 +88,8 @@ apiVersion: cilium.io/v2
 kind: CiliumLoadBalancerIPPool
 metadata:
   name: ip-pool-public
+  labels:
+    bgp: public
 spec:
   blocks:
     - start: "172.17.0.1"
@@ -90,7 +101,9 @@ spec:
 
 ### 2. BGP Advertisement (Cilium → BIRD)
 
-The Cilium agent on each node runs a BGP speaker. The **CiliumBGPClusterConfig** tells every node to peer with the BIRD router:
+The Cilium agent on each node runs a BGP speaker. Three resources work together to configure BGP:
+
+The **CiliumBGPClusterConfig** tells every node to peer with the BIRD router and references a peer configuration:
 
 ```yaml
 apiVersion: cilium.io/v2
@@ -105,15 +118,35 @@ spec:
     - name: "router"
       peerASN: 65001              # Same ASN = iBGP
       peerAddress: "10.10.10.40"  # BIRD router
+      peerConfigRef:
+        name: "cilium-peer"       # References the CiliumBGPPeerConfig below
 ```
 
-The **CiliumBGPAdvertisement** controls what gets advertised:
+The **CiliumBGPPeerConfig** defines the address family and links to the advertisements via label selector:
+
+```yaml
+apiVersion: cilium.io/v2
+kind: CiliumBGPPeerConfig
+metadata:
+  name: cilium-peer
+spec:
+  families:
+    - afi: ipv4
+      safi: unicast
+      advertisements:
+        matchLabels:
+          advertise: "bgp"        # Selects CiliumBGPAdvertisement with this label
+```
+
+The **CiliumBGPAdvertisement** controls what gets advertised. It must have the label that the peer config selects:
 
 ```yaml
 apiVersion: cilium.io/v2
 kind: CiliumBGPAdvertisement
 metadata:
   name: bgp-advertisements
+  labels:
+    advertise: bgp                # ← Matched by CiliumBGPPeerConfig above
 spec:
   advertisements:
     - advertisementType: "PodCIDR"       # Pod network routes
@@ -124,15 +157,26 @@ spec:
       selector:
         matchExpressions:
           - { key: bgp, operator: In, values: [ public ] }
+      attributes:
+        communities:
+          standard: [ "65001" ]
+```
+
+The relationship between these resources:
+
+```
+CiliumBGPClusterConfig
+  └── peers[].peerConfigRef ──► CiliumBGPPeerConfig
+                                  └── families[].advertisements.matchLabels ──► CiliumBGPAdvertisement
 ```
 
 Each Cilium agent advertises:
 - Its **Pod CIDR** (e.g., `10.0.3.0/24` from worker-1)
-- Any **LoadBalancer IPs** for services with `bgp: public`
+- Any **LoadBalancer IPs** for services with `bgp: public` label
 
 ### 3. Route Learning (BIRD)
 
-BIRD 2 runs on the dedicated router VM and peers with all 5 K8s nodes:
+BIRD 2 runs on the dedicated router VM and peers with all 5 K8s nodes (3 masters + 2 workers):
 
 ```
 BIRD config (simplified):
@@ -144,22 +188,39 @@ template bgp k8s_node {
       gw = from;                  ← Use neighbor IP as gateway
       accept;
     };
+    export none;                  ← BIRD does not advertise anything back
   };
+}
+
+protocol bgp k8s_node_1 from k8s_node {
+  neighbor 10.10.10.11 as 65001;  ← Peer with master-1
+}
+
+protocol bgp k8s_node_2 from k8s_node {
+  neighbor 10.10.10.12 as 65001;  ← Peer with master-2
+}
+
+protocol bgp k8s_node_3 from k8s_node {
+  neighbor 10.10.10.13 as 65001;  ← Peer with master-3
 }
 
 protocol bgp k8s_worker_1 from k8s_node {
   neighbor 10.10.10.21 as 65001;  ← Peer with worker-1
 }
+
+protocol bgp k8s_worker_2 from k8s_node {
+  neighbor 10.10.10.22 as 65001;  ← Peer with worker-2
+}
 ```
 
 When BIRD receives the BGP advertisement for `172.17.0.1/32` from worker-1, it:
 1. Learns the route
-2. Rewrites the next-hop to `10.10.10.21` (the neighbor's private IP)
-3. Installs it in the Linux kernel routing table
+2. Rewrites the next-hop to `10.10.10.21` (the neighbor's IP, via the `gw = from` filter)
+3. Installs it in the Linux kernel routing table (via the `kernel` protocol with `export all`)
 
 Result in the kernel:
 ```
-172.17.0.1 via 10.10.10.21 dev eth2 proto bird
+172.17.0.1 via 10.10.10.21 dev eth2 proto bird metric 32
 ```
 
 ### 4. External Access (Host → BIRD → K8s)
@@ -168,7 +229,7 @@ The BIRD router has two interfaces:
 - `eth2` (10.10.10.40) — private network, connected to K8s nodes
 - `eth1` (192.168.0.40) — external network, reachable from your LAN
 
-IP forwarding is enabled so the router forwards packets between interfaces. From your host, you add a static route pointing the LoadBalancer pool to the BIRD router:
+IP forwarding is enabled (`net.ipv4.ip_forward = 1`) so the router forwards packets between interfaces. From your host, you add a static route pointing the LoadBalancer pool to the BIRD router:
 
 ```bash
 sudo ip route add 172.17.0.0/24 via 10.10.10.40
@@ -176,18 +237,18 @@ sudo ip route add 172.17.0.0/24 via 10.10.10.40
 
 Traffic flow (pure routing, no NAT):
 ```
-Host → 172.17.0.1 → via 10.10.10.40 (bird-router)
-  → kernel route (BGP-learned) → via 10.10.10.21 (worker-1)
-    → Cilium eBPF → nginx pod
+Host (10.10.10.1) → 172.17.0.1
+  → via 10.10.10.40 (bird-router, host static route)
+    → via 10.10.10.21 (worker-1, BGP-learned kernel route)
+      → Cilium eBPF → nginx pod
 ```
 
 ### 5. Return Path
 
 The response follows the reverse path:
 ```
-nginx pod → Cilium eBPF → worker-1
-  → 10.10.10.40 (bird-router, on the same subnet)
-    → host (10.10.10.1, on the same subnet)
+nginx pod → Cilium eBPF → worker-1 (10.10.10.21)
+  → host (10.10.10.1, on the same 10.10.10.0/24 subnet)
 ```
 
 No NAT is involved — the BIRD router acts as a pure IP router.
@@ -200,6 +261,6 @@ All peers use **ASN 65001** — this is iBGP (internal BGP). This is appropriate
 
 | File | Role |
 |------|------|
-| `cilium-bgp.yml` | Cilium BGP cluster config, peer config, advertisements, IP pool |
-| `ansible/files/bird.conf` | BIRD 2 BGP peering with all K8s nodes |
+| `cilium-bgp.yml` | All Cilium BGP resources: CiliumBGPClusterConfig, CiliumBGPPeerConfig, CiliumBGPAdvertisement, CiliumLoadBalancerIPPool |
+| `ansible/files/bird.conf` | BIRD 2 BGP peering with all 5 K8s nodes |
 | `k8s/service.yml` | Example LoadBalancer service with `bgp: public` label |
