@@ -16,10 +16,10 @@ This setup solves all three problems using BGP (Border Gateway Protocol):
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│                        External Network                          │
-│                       (192.168.0.0/24)                           │
+│                     Host Machine (10.10.10.1)                    │
 │                                                                  │
-│   Your browser ──► 192.168.0.40 (bird-router external IP)       │
+│   Your browser ──► http://172.17.0.1 (LoadBalancer IP)           │
+│                    route: 172.17.0.0/24 via 10.10.10.40          │
 └──────────────────────────┬───────────────────────────────────────┘
                            │
                            │ IP Forwarding (no NAT)
