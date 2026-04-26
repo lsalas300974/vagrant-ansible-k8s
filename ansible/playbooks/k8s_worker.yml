@@ -26,3 +26,6 @@
 
     - name: Join the node to cluster
       ansible.builtin.command: "{{ join_command }}"
+
+    - name: Include task to add external network return route
+      ansible.builtin.include_tasks: includes/external_route.yml

@@ -123,7 +123,8 @@ This fork is a **significant modernization** of the original project. The follow
 | k8s-worker-1 | k8s-worker-1 | 10.10.10.21 | 1 | 1GB | Worker node |
 | k8s-worker-2 | k8s-worker-2 | 10.10.10.22 | 1 | 1GB | Worker node |
 | bird-router | bird-router | 10.10.10.40 / 192.168.0.40 | 1 | 512MB | BGP router |
-| | | | **10** | **9.25GB** | **Total** |
+| test-client | test-client | 192.168.0.50 | 1 | 512MB | External test client (CLI) |
+| | | | **11** | **9.75GB** | **Total** |
 
 ---
 
@@ -213,7 +214,7 @@ source start_host_config.sh
 > **Note:** You must use `source` (not `./`) so the `KUBECONFIG` export takes effect in your current shell. The static route requires `sudo` and will prompt for your password.
 
 This script:
-- Adds a static route `172.17.0.0/24 via 10.10.10.40` so your host can reach LoadBalancer service IPs through the BIRD router
+- Adds a static route `172.17.0.0/24 via 192.168.0.40` so your host can reach LoadBalancer service IPs through the BIRD router's external interface
 - Exports `KUBECONFIG=~/.kube/config-vagrant-k8s` so `kubectl` connects to the cluster
 
 Both settings are lost on host reboot, so run this script again after each restart.
@@ -388,6 +389,29 @@ Each service gets a unique IP from the pool (`172.17.0.0/24`), and BIRD automati
 
 ---
 
+## Test Client VM (optional)
+
+An optional test-client VM is available to test LoadBalancer access from an external network (`192.168.0.0/24`), simulating a real client that is **not** on the K8s private subnet.
+
+The test-client does not start with `vagrant up` — it must be started explicitly:
+
+```bash
+vagrant up test-client
+```
+
+This will prompt you to select a bridged network interface (same as the bird-router). During provisioning, it automatically tests connectivity to `http://172.17.0.1` and displays the result.
+
+To test manually:
+
+```bash
+vagrant ssh test-client
+curl http://172.17.0.1
+```
+
+The test-client has a static route `172.17.0.0/24 via 192.168.0.40` configured via netplan, so it routes LoadBalancer traffic through the BIRD router's external interface — the same way a real external client would.
+
+---
+
 ## Managing the Stack
 
 ### Stop all VMs (preserves state)
@@ -448,6 +472,7 @@ vagrant ssh bird-router
         ├── k8s_master_secondary.yml     # Secondary masters: join as control plane
         ├── k8s_worker.yml               # Workers: join cluster
         ├── bird_install.yml             # BIRD 2 router setup + BGP validation
+        ├── test_client.yml              # Test client VM with XFCE desktop + LB route
         └── includes/
             ├── apt_over_https.yml       # APT HTTPS transport packages
             ├── install_useful_packages.yml  # net-tools
@@ -455,6 +480,7 @@ vagrant ssh bird-router
             ├── install_docker.yml       # containerd.io from Docker repo
             ├── bootstrap_k8s.yml        # K8s repo, kubelet, kubeadm, kubectl
             ├── prepare_cilium.yml       # BPF mount, sysctl, kernel tools
+            ├── external_route.yml       # Static route to 192.168.0.0/24 via bird-router
             └── setup_kube_config.yml    # kubeconfig for root and vagrant users
 ```
 

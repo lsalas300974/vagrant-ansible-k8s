@@ -133,3 +133,6 @@
       ansible.builtin.command: kubectl apply -f /vagrant/k8s/service.yml
       environment:
         KUBECONFIG: /etc/kubernetes/admin.conf
+
+    - name: Include task to add external network return route
+      ansible.builtin.include_tasks: includes/external_route.yml

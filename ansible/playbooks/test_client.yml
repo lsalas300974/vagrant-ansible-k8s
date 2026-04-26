@@ -1,0 +1,42 @@
+---
+- name: Setup test client for external LoadBalancer access
+  hosts: all
+  become: true
+  tasks:
+
+    - name: Include task to install packages that enable apt over HTTPS
+      ansible.builtin.include_tasks: includes/apt_over_https.yml
+
+    - name: Install curl
+      ansible.builtin.apt:
+        name: curl
+        state: present
+        update_cache: yes
+
+    - name: Add static route to LoadBalancer pool via bird-router
+      ansible.builtin.copy:
+        dest: /etc/netplan/99-lb-route.yaml
+        owner: root
+        group: root
+        mode: '0600'
+        content: |
+          network:
+            version: 2
+            ethernets:
+              eth1:
+                routes:
+                  - to: 172.17.0.0/24
+                    via: 192.168.0.40
+
+    - name: Apply netplan
+      ansible.builtin.command: netplan apply
+      changed_when: true
+
+    - name: Test connectivity to LoadBalancer service
+      ansible.builtin.shell: curl -s --connect-timeout 10 http://172.17.0.1 | head -5
+      register: curl_test
+      changed_when: false
+
+    - name: Display test result
+      ansible.builtin.debug:
+        var: curl_test.stdout_lines

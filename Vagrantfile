@@ -10,6 +10,7 @@ K8S_LB_IP_START = 30
 PRIVATE_IP_NW = "10.10.10."
 ROUTER_IP_INSIDE_START = 40
 ROUTER_IP_OUTSIDE = "192.168.0.40"
+TEST_CLIENT_IP = "192.168.0.50"
 
 Vagrant.configure("2") do |config|
     config.vm.box = VAGRANT_IMAGE_NAME
@@ -138,6 +139,36 @@ Vagrant.configure("2") do |config|
                 node_ip: PRIVATE_IP_NW + "#{ROUTER_IP_INSIDE_START}",
                 router_ip_outside: ROUTER_IP_OUTSIDE,
             }
+        end
+
+        router.trigger.after :up do |trigger|
+            trigger.name = "Configure host: route + kubeconfig"
+            trigger.run = {
+                path: "start_host_config.sh"
+            }
+        end
+    end
+
+    config.vm.define "test-client", autostart: false do |client|
+        client.vm.provider "virtualbox" do |vb|
+            vb.name = "test-client"
+            vb.memory = 512
+            vb.cpus = 1
+            vb.customize ["modifyvm", :id, "--hwvirtex", "on"]
+            vb.customize ["modifyvm", :id, "--nested-paging","on"]
+            vb.customize ["modifyvm", :id, "--nested-hw-virt","on"]
+            vb.customize ["modifyvm", :id, "--cpuhotplug","on"]
+            vb.customize ["modifyvm", :id, "--audio-driver", "none"]
+            vb.customize ["modifyvm", :id, "--nictype1", "virtio"]
+            vb.customize ["modifyvm", :id, "--nictype2", "virtio"]
+            vb.customize ["modifyvm", :id, "--natdnshostresolver1", "on"]
+            vb.customize ["modifyvm", :id, "--natdnsproxy1", "on"]
+        end
+        client.vm.hostname = "test-client"
+        client.vm.network :public_network, ip: TEST_CLIENT_IP, netmask: "255.255.255.0"
+        client.vm.provision "ansible" do |ansible|
+            ansible.compatibility_mode = "2.0"
+            ansible.playbook = "ansible/playbooks/test_client.yml"
         end
     end
 end

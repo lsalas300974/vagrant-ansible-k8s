@@ -1,0 +1,19 @@
+---
+- name: Add static route to external network (192.168.0.0/24) via bird-router
+  ansible.builtin.copy:
+    dest: /etc/netplan/99-external-route.yaml
+    owner: root
+    group: root
+    mode: '0600'
+    content: |
+      network:
+        version: 2
+        ethernets:
+          eth1:
+            routes:
+              - to: 192.168.0.0/24
+                via: 10.10.10.40
+
+- name: Apply netplan for external route
+  ansible.builtin.command: netplan apply
+  changed_when: true
